@@ -1,0 +1,78 @@
+name: Compilar DriveVerse para iPhone
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-26
+    steps:
+      - name: Descargar el repositorio
+        uses: actions/checkout@v4
+
+      - name: Preparar el archivo de Spotify
+        env:
+          SPOTIFY_CLIENT_ID: ${{ secrets.SPOTIFY_CLIENT_ID }}
+        run: |
+          if [ -z "$SPOTIFY_CLIENT_ID" ]; then
+            echo "ERROR: falta configurar SPOTIFY_CLIENT_ID en los secretos de GitHub"
+            exit 1
+          fi
+          cp DriveVerse/Resources/Secrets.example.plist DriveVerse/Resources/Secrets.plist
+          /usr/libexec/PlistBuddy -c "Set :SpotifyClientID $SPOTIFY_CLIENT_ID" DriveVerse/Resources/Secrets.plist
+
+      - name: Crear identificadores propios y regenerar el proyecto
+        env:
+          GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+        run: |
+          python3 - <<'PY'
+          import os, re
+          from pathlib import Path
+          owner = re.sub(r'[^a-z0-9]', '', os.environ['GITHUB_REPOSITORY_OWNER'].lower())
+          if not owner:
+              raise RuntimeError('Nombre de usuario de GitHub no válido')
+          new_id = f'com.{owner}.driveverselyrics'
+          file = Path('project.yml')
+          content = file.read_text()
+          content = content.replace('com.praveetgupta.driveverse.widgets', new_id + '.widgets')
+          content = content.replace('com.praveetgupta.driveverse', new_id)
+          content = content.replace('com.praveetgupta', f'com.{owner}')
+          file.write_text(content)
+          print('Identificador de la aplicación:', new_id)
+          PY
+          brew install xcodegen
+          xcodegen generate
+
+      - name: Compilar sin firma para dispositivo iPhone
+        run: |
+          xcodebuild -version
+          xcodebuild \
+            -project DriveVerse.xcodeproj \
+            -scheme DriveVerse \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/DriveVerseBuild" \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Crear el archivo IPA
+        run: |
+          set -e
+          APP="$RUNNER_TEMP/DriveVerseBuild/Build/Products/Release-iphoneos/DriveVerse.app"
+          test -d "$APP"
+          test -d "$APP/PlugIns/DriveVerseWidgets.appex"
+          mkdir -p "$RUNNER_TEMP/paquete/Payload"
+          ditto "$APP" "$RUNNER_TEMP/paquete/Payload/DriveVerse.app"
+          cd "$RUNNER_TEMP/paquete"
+          zip -qry "$GITHUB_WORKSPACE/DriveVerse.ipa" Payload
+
+      - name: Publicar IPA descargable
+        uses: actions/upload-artifact@v4
+        with:
+          name: DriveVerse-iPhone-IPA
+          path: DriveVerse.ipa
+          retention-days: 7
